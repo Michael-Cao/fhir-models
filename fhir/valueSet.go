@@ -5,6 +5,7 @@ import "encoding/json"
 type ValueSet struct {
 	Id      *string          `bson:"id,omitempty" json:"id,omitempty"`
 	Name    *string          `bson:"name,omitempty" json:"name,omitempty"`
+	Url     *string          `bson:"url,omitempty" json:"url,omitempty"`
 	Compose *ValueSetCompose `bson:"compose,omitempty" json:"compose,omitempty"`
 }
 
@@ -14,7 +15,9 @@ type ValueSetCompose struct {
 }
 
 type ValueSetComposeInclude struct {
-	Id *string `bson:"id,omitempty" json:"id,omitempty"`
+	Id      *string `bson:"id,omitempty" json:"id,omitempty"`
+	System  *string `bson:"system,omitempty" json:"system,omitempty"`
+	Version *string `bson:"version,omitempty" json:"version,omitempty"`
 }
 
 type OtherValueSet ValueSet
