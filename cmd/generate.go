@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/dave/jennifer/jen"
 	"github.com/spf13/cobra"
@@ -31,6 +33,8 @@ func UnmarshalResource(b []byte) (Resource, error) {
 	}
 	return resource, nil
 }
+
+var namePattern = regexp.MustCompile("^[A-Z]([A-Za-z0-9_]){0,254}$")
 
 type ResourceMap = map[string]map[string][]byte
 
@@ -178,9 +182,274 @@ func generateResourceOrType(resources ResourceMap, requiredTypes map[string]bool
 		file.Commentf("Unmarshal%s unmarshals a %s.", definition.Name, definition.Name)
 	}
 
+	var err error
+	file.Type().Id(definition.Name).StructFunc(func(rootStruct *jen.Group) {
+		_, err = appendFields(resources, requiredTypes, requiredValueSetBindings, file, rootStruct, definition.Name, elementDefinitions, 1, 1)
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// generate marshal
+	if definition.Kind == fhir.StructureDefinitionKindResource {
+		file.Type().Id("Other" + definition.Name).Id(definition.Name)
+		file.Commentf("MarshalJSON marshals the given %s as JSON into a byte slice", definition.Name)
+		file.Func().Params(jen.Id("r").Id(definition.Name)).Id("MarshalJSON").Params().
+			Params(jen.Op("[]").Byte(), jen.Error()).Block(
+			jen.Return().Qual("encoding/json", "Marshal").Call(jen.Struct(
+				jen.Id("Other"+definition.Name),
+				jen.Id("ResourceType").String().Tag(map[string]string{"json": "resourceType"}),
+			).Values(jen.Dict{
+				jen.Id("Other" + definition.Name): jen.Id("Other" + definition.Name).Call(jen.Id("r")),
+				jen.Id("ResourceType"):            jen.Lit(definition.Name),
+			})),
+		)
+	}
+
+	// generate unmarshal
+	if definition.Kind == fhir.StructureDefinitionKindResource {
+		file.Commentf("Unmarshal%s unmarshals a %s.", definition.Name, definition.Name)
+		file.Func().Id("Unmarshal"+definition.Name).
+			Params(jen.Id("b").Op("[]").Byte()).
+			Params(jen.Id(definition.Name), jen.Error()).
+			Block(
+				jen.Var().Id(FirstLower(definition.Name)).Id(definition.Name),
+				jen.If(
+					jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+						jen.Id("b"),
+						jen.Op("&").Id(FirstLower(definition.Name)),
+					),
+					jen.Err().Op("!=").Nil(),
+				).Block(
+					jen.Return(jen.Id(FirstLower(definition.Name)), jen.Err()),
+				),
+				jen.Return(jen.Id(FirstLower(definition.Name)), jen.Nil()),
+			)
+	}
+
 	return file, nil
 }
 
 func FirstLower(s string) string {
 	return strings.ToLower(s[:1]) + s[1:]
+}
+
+func appendFields(resources ResourceMap, requiredTypes map[string]bool, requiredValueSetBindings map[string]bool,
+	file *jen.File, fields *jen.Group, parentName string, elementDefinitions []fhir.ElementDefinition, start,
+	level int) (int, error) {
+	//fmt.Printf("appendFields parentName=%s, start=%d, level=%d\n", parentName, start, level)
+	for i := start; i < len(elementDefinitions); i++ {
+		element := elementDefinitions[i]
+		pathParts := strings.Split(element.Path, ".")
+		if len(pathParts) == level+1 {
+			// direct childs
+			name := strings.Title(pathParts[level])
+
+			// support contained resources later
+			if name != "Contained" {
+				switch len(element.Type) {
+				case 0:
+					if element.ContentReference != nil && (*element.ContentReference)[:1] == "#" {
+						statement := fields.Id(name)
+
+						if *element.Max == "*" {
+							statement.Op("[]")
+						} else if *element.Min == 0 {
+							statement.Op("*")
+						}
+
+						typeIdentifier := ""
+						for _, pathPart := range strings.Split((*element.ContentReference)[1:], ".") {
+							typeIdentifier = typeIdentifier + strings.Title(pathPart)
+						}
+						statement.Id(typeIdentifier).Tag(map[string]string{"json": pathParts[level] + ",omitempty", "bson": pathParts[level] + ",omitempty"})
+					}
+				case 1:
+					var err error
+					i, err = addFieldStatement(resources, requiredTypes, requiredValueSetBindings, file, fields,
+						pathParts[level], parentName, elementDefinitions, i, level, element.Type[0])
+
+					if err != nil {
+						return 0, err
+					}
+				default: //polymorphic type
+					name = strings.Replace(pathParts[level], "[x]", "", -1)
+					for _, eleType := range element.Type {
+						name := name + strings.Title(*eleType.Code)
+
+						var err error
+						i, err = addFieldStatement(resources, requiredTypes, requiredValueSetBindings, file, fields,
+							name, parentName, elementDefinitions, i, level, eleType)
+
+						if err != nil {
+							return 0, err
+						}
+					}
+				}
+			}
+		} else {
+			// index of the next parent sibling
+			return i, nil
+		}
+	}
+	return 0, nil
+}
+
+func addFieldStatement(
+	resources ResourceMap,
+	requiredTypes map[string]bool,
+	requiredValueSetBindings map[string]bool,
+	file *jen.File,
+	fields *jen.Group,
+	name string,
+	parentName string,
+	elementDefinitions []fhir.ElementDefinition,
+	elementIndex, level int,
+	elementType fhir.ElementDefinitionType,
+) (idx int, err error) {
+	fieldName := strings.Title(name)
+	element := elementDefinitions[elementIndex]
+	statement := fields.Id(fieldName)
+
+	switch *elementType.Code {
+	case "code":
+		if *element.Max == "*" {
+			statement.Op("[]")
+		} else if *element.Min == 0 {
+			statement.Op("*")
+		}
+
+		if url := requiredValueSetBinding(element); url != nil {
+			if bytes := resources["ValueSet"][*url]; bytes != nil {
+				valueSet, err := fhir.UnmarshalValueSet(bytes)
+				if err != nil {
+					return 0, err
+				}
+				if name := valueSet.Name; name != nil {
+					if !namePattern.MatchString(*name) {
+						fmt.Printf("Skip generating an enum for a ValueSet binding to `%s` because the ValueSet has a non-conforming name.\n", *name)
+						statement.Id("string")
+					} else if len(valueSet.Compose.Include) > 1 {
+						fmt.Printf("Skip generating an enum for a ValueSet binding to `%s` because the ValueSet includes more than one CodeSystem.\n", *valueSet.Name)
+						statement.Id("string")
+					} else if codeSystemUrl := canonical(valueSet.Compose.Include[0]); resources["CodeSystem"][codeSystemUrl] == nil {
+						fmt.Printf("Skip generating an enum for a ValueSet binding to `%s` because the ValueSet includes the non-existing CodeSystem with canonical URL `%s`.\n", *valueSet.Name, codeSystemUrl)
+						statement.Id("string")
+					} else {
+						requiredValueSetBindings[*url] = true
+						statement.Id(*name)
+					}
+				} else {
+					return 0, fmt.Errorf("missing name in ValueSet with canonical URL `%s`", *url)
+				}
+			} else {
+				statement.Id("string")
+			}
+		} else {
+			statement.Id("string")
+		}
+	case "Resource":
+		statement.Qual("encoding/json", "RawMessage")
+	default:
+		if *element.Max == "*" {
+			statement.Op("[]")
+		} else if *element.Min == 0 {
+			statement.Op("*")
+		}
+
+		var typeIdentifier string
+		if parentName == "Element" && fieldName == "Id" ||
+			parentName == "Extension" && fieldName == "Url" {
+			typeIdentifier = "string"
+		} else {
+			typeIdentifier = typeCodeToTypeIdentifier(elementType.Code)
+		}
+		if typeIdentifier == "Element" || typeIdentifier == "BackboneElement" {
+			backboneElementName := parentName + fieldName
+			statement.Id(backboneElementName)
+			var err error
+			file.Type().Id(backboneElementName).StructFunc(func(childFields *jen.Group) {
+				//var err error
+				elementIndex, err = appendFields(resources, requiredTypes, requiredValueSetBindings, file, childFields,
+					backboneElementName, elementDefinitions, elementIndex+1, level+1)
+			})
+			if err != nil {
+				return 0, err
+			}
+			elementIndex--
+		} else if typeIdentifier == "decimal" {
+			statement.Qual("encoding/json", "Number")
+		} else {
+			if unicode.IsUpper(rune(typeIdentifier[0])) {
+				requiredTypes[typeIdentifier] = true
+			}
+			statement.Id(typeIdentifier)
+		}
+	}
+
+	if *element.Min == 0 {
+		statement.Tag(map[string]string{"json": name + ",omitempty", "bson": name + ",omitempty"})
+	} else {
+		statement.Tag(map[string]string{"json": name, "bson": name})
+	}
+
+	return elementIndex, err
+}
+
+func requiredValueSetBinding(elementDefinition fhir.ElementDefinition) *string {
+	if elementDefinition.Binding != nil {
+		binding := *elementDefinition.Binding
+		if binding.Strength == fhir.BindingStrengthRequired {
+			return binding.ValueSet
+		}
+	}
+	return nil
+}
+
+func typeCodeToTypeIdentifier(typeCode *string) string {
+	switch *typeCode {
+	case "base64Binary":
+		return "string"
+	case "boolean":
+		return "bool"
+	case "canonical":
+		return "string"
+	case "code":
+		return "string"
+	case "date":
+		return "string"
+	case "dateTime":
+		return "string"
+	case "id":
+		return "string"
+	case "instant":
+		return "string"
+	case "integer":
+		return "int"
+	case "markdown":
+		return "string"
+	case "oid":
+		return "string"
+	case "positiveInt":
+		return "int"
+	case "string":
+		return "string"
+	case "time":
+		return "string"
+	case "unsignedInt":
+		return "int"
+	case "uri":
+		return "string"
+	case "url":
+		return "string"
+	case "uuid":
+		return "string"
+	case "xhtml":
+		return "string"
+	case "http://hl7.org/fhirpath/System.String":
+		return "string"
+	default:
+		return *typeCode
+	}
 }
