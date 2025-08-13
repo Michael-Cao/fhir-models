@@ -1,6 +1,9 @@
 package fhir
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 type StructureDefinition struct {
 	Id       *string                      `bson:"id,omitempty" json:"id,omitempty"`
@@ -32,6 +35,7 @@ func (r StructureDefinition) MarshalJSON() ([]byte, error) {
 func UnmarshalStructureDefinition(b []byte) (StructureDefinition, error) {
 	var structureDefinition StructureDefinition
 	if err := json.Unmarshal(b, &structureDefinition); err != nil {
+		fmt.Println(err)
 		return structureDefinition, err
 	}
 	return structureDefinition, nil

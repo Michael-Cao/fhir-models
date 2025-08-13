@@ -13,7 +13,7 @@ type ElementDefinition struct {
 
 type ElementDefinitionType struct {
 	Id   *string `bson:"id,omitempty" json:"id,omitempty"`
-	Code *string `bson:"code,omitempty" json:"code,omitempty"`
+	Code string  `bson:"code,omitempty" json:"code,omitempty"`
 }
 
 type ElementDefinitionBinding struct {

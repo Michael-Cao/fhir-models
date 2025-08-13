@@ -69,6 +69,8 @@ var generateCmd = &cobra.Command{
 			dir = tmpDir
 		}
 
+		os.MkdirAll("r4", 0777)
+
 		fmt.Println(dir)
 		processFiles(dir)
 	},
@@ -135,6 +137,7 @@ func processFiles(tmpDir string) error {
 	})
 
 	if err != nil {
+		fmt.Println(err)
 		return err
 	}
 
@@ -144,6 +147,7 @@ func processFiles(tmpDir string) error {
 	for _, bytes := range resources["StructureDefinition"] {
 		structureDefinition, err := fhir.UnmarshalStructureDefinition(bytes)
 		if err != nil {
+			fmt.Println("failed unmarshal")
 			return nil
 		}
 
@@ -156,8 +160,9 @@ func processFiles(tmpDir string) error {
 				os.Exit(1)
 			}
 
-			err = goFile.Save(FirstLower(structureDefinition.Name) + ".go")
+			err = goFile.Save("r4/" + FirstLower(structureDefinition.Name) + ".go")
 			if err != nil {
+				fmt.Println(err)
 				return err
 			}
 		}
@@ -166,67 +171,76 @@ func processFiles(tmpDir string) error {
 	return nil
 }
 
-func generateResourceOrType(resources ResourceMap, requiredTypes map[string]bool, requiredValueSetBindings map[string]bool, definition fhir.StructureDefinition) (*jen.File, error) {
+func generateResourceOrType(
+	resources ResourceMap,
+	requiredTypes map[string]bool,
+	requiredValueSetBindings map[string]bool,
+	definition fhir.StructureDefinition) (*jen.File, error) {
 
 	elementDefinitions := definition.Snapshot.Element
 	if len(elementDefinitions) == 0 {
 		return nil, fmt.Errorf("missing element definitions in structure definition `%s`", definition.Name)
 	}
 
-	fmt.Printf("Generate Go sources for StructureDefinition: %s\n", definition.Name)
-	file := jen.NewFile("fhir")
+	re := regexp.MustCompile(`\s+`)
+	name := strings.ReplaceAll(definition.Name, "-", "")
+	name = re.ReplaceAllString(name, "")
 
-	file.Commentf("%s is documented here %s", definition.Name, definition.Url)
+	fmt.Printf("Generate Go sources for StructureDefinition: %s\n", name)
+	file := jen.NewFile("r4")
+
+	file.Commentf("%s is documented here %s", name, definition.Url)
 
 	if definition.Kind == fhir.StructureDefinitionKindResource {
 		file.Commentf("Unmarshal%s unmarshals a %s.", definition.Name, definition.Name)
 	}
 
 	var err error
-	file.Type().Id(definition.Name).StructFunc(func(rootStruct *jen.Group) {
-		_, err = appendFields(resources, requiredTypes, requiredValueSetBindings, file, rootStruct, definition.Name, elementDefinitions, 1, 1)
+	file.Type().Id(name).StructFunc(func(rootStruct *jen.Group) {
+		_, err = appendFields(resources, requiredTypes, requiredValueSetBindings, file, rootStruct, name, elementDefinitions, 1, 1)
 	})
 
 	if err != nil {
+		fmt.Printf("failed %v\n", err)
 		return nil, err
 	}
 
 	// generate marshal
 	if definition.Kind == fhir.StructureDefinitionKindResource {
-		file.Type().Id("Other" + definition.Name).Id(definition.Name)
-		file.Commentf("MarshalJSON marshals the given %s as JSON into a byte slice", definition.Name)
-		file.Func().Params(jen.Id("r").Id(definition.Name)).Id("MarshalJSON").Params().
+		file.Type().Id("Other" + name).Id(name)
+		file.Commentf("MarshalJSON marshals the given %s as JSON into a byte slice", name)
+		file.Func().Params(jen.Id("r").Id(name)).Id("MarshalJSON").Params().
 			Params(jen.Op("[]").Byte(), jen.Error()).Block(
 			jen.Return().Qual("encoding/json", "Marshal").Call(jen.Struct(
-				jen.Id("Other"+definition.Name),
+				jen.Id("Other"+name),
 				jen.Id("ResourceType").String().Tag(map[string]string{"json": "resourceType"}),
 			).Values(jen.Dict{
-				jen.Id("Other" + definition.Name): jen.Id("Other" + definition.Name).Call(jen.Id("r")),
-				jen.Id("ResourceType"):            jen.Lit(definition.Name),
+				jen.Id("Other" + name): jen.Id("Other" + name).Call(jen.Id("r")),
+				jen.Id("ResourceType"): jen.Lit(name),
 			})),
 		)
 	}
 
-	// generate unmarshal
-	if definition.Kind == fhir.StructureDefinitionKindResource {
-		file.Commentf("Unmarshal%s unmarshals a %s.", definition.Name, definition.Name)
-		file.Func().Id("Unmarshal"+definition.Name).
-			Params(jen.Id("b").Op("[]").Byte()).
-			Params(jen.Id(definition.Name), jen.Error()).
-			Block(
-				jen.Var().Id(FirstLower(definition.Name)).Id(definition.Name),
-				jen.If(
-					jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
-						jen.Id("b"),
-						jen.Op("&").Id(FirstLower(definition.Name)),
-					),
-					jen.Err().Op("!=").Nil(),
-				).Block(
-					jen.Return(jen.Id(FirstLower(definition.Name)), jen.Err()),
-				),
-				jen.Return(jen.Id(FirstLower(definition.Name)), jen.Nil()),
-			)
-	}
+	// // generate unmarshal
+	// if definition.Kind == fhir.StructureDefinitionKindResource {
+	// 	file.Commentf("Unmarshal%s unmarshals a %s.", definition.Name, definition.Name)
+	// 	file.Func().Id("Unmarshal"+definition.Name).
+	// 		Params(jen.Id("b").Op("[]").Byte()).
+	// 		Params(jen.Id(definition.Name), jen.Error()).
+	// 		Block(
+	// 			jen.Var().Id(FirstLower(definition.Name)).Id(definition.Name),
+	// 			jen.If(
+	// 				jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+	// 					jen.Id("b"),
+	// 					jen.Op("&").Id(FirstLower(definition.Name)),
+	// 				),
+	// 				jen.Err().Op("!=").Nil(),
+	// 			).Block(
+	// 				jen.Return(jen.Id(FirstLower(definition.Name)), jen.Err()),
+	// 			),
+	// 			jen.Return(jen.Id(FirstLower(definition.Name)), jen.Nil()),
+	// 		)
+	// }
 
 	return file, nil
 }
@@ -276,7 +290,7 @@ func appendFields(resources ResourceMap, requiredTypes map[string]bool, required
 				default: //polymorphic type
 					name = strings.Replace(pathParts[level], "[x]", "", -1)
 					for _, eleType := range element.Type {
-						name := name + strings.Title(*eleType.Code)
+						name := name + strings.Title(eleType.Code)
 
 						var err error
 						i, err = addFieldStatement(resources, requiredTypes, requiredValueSetBindings, file, fields,
@@ -312,7 +326,7 @@ func addFieldStatement(
 	element := elementDefinitions[elementIndex]
 	statement := fields.Id(fieldName)
 
-	switch *elementType.Code {
+	switch elementType.Code {
 	case "code":
 		if *element.Max == "*" {
 			statement.Op("[]")
@@ -407,8 +421,8 @@ func requiredValueSetBinding(elementDefinition fhir.ElementDefinition) *string {
 	return nil
 }
 
-func typeCodeToTypeIdentifier(typeCode *string) string {
-	switch *typeCode {
+func typeCodeToTypeIdentifier(typeCode string) string {
+	switch typeCode {
 	case "base64Binary":
 		return "string"
 	case "boolean":
@@ -450,6 +464,6 @@ func typeCodeToTypeIdentifier(typeCode *string) string {
 	case "http://hl7.org/fhirpath/System.String":
 		return "string"
 	default:
-		return *typeCode
+		return typeCode
 	}
 }
